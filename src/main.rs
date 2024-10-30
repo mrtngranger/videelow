@@ -1,10 +1,12 @@
-use std::fs::{create_dir_all};
+use std::fs::{create_dir_all, remove_file};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use clap::Parser;
+use thiserror::Error;
 
 /// Struct to parse command line arguments using clap
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = "Video downloader and converter")]
 struct Args {
     /// URL of the video to download
     #[arg(short, long)]
@@ -17,77 +19,121 @@ struct Args {
     /// Output directory where the files will be saved
     #[arg(short, long, default_value = "Processed")]
     output_dir: String,
-
-    /// Video format to download (e.g., mp4, webm)
-    #[arg(short, long, default_value = "mp4")]
-    format: String,
 }
 
-fn download_youtube_video(url: &str, output_path: &str, format: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Downloading video from YouTube using yt-dlp...");
+/// Custom error type for improved error handling
+#[derive(Error, Debug)]
+enum VideoConversionError {
+    #[error("Failed to execute command: {0}")]
+    CommandError(String),
 
-    let status = Command::new("yt-dlp")
-        .arg("-f")
-        .arg(format)  // Specify the format, e.g., mp4
-        .arg("-o")
-        .arg(output_path)  // Custom output path for the video
-        .arg(url)  // YouTube URL
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+}
 
+/// Helper function to run external commands
+fn run_command(command: &mut Command) -> Result<(), VideoConversionError> {
+    let status = command.status().map_err(|e| VideoConversionError::CommandError(e.to_string()))?;
     if status.success() {
-        println!("Video downloaded successfully: {}", output_path);
+        Ok(())
     } else {
-        eprintln!("Error downloading the video.");
+        Err(VideoConversionError::CommandError("Command failed".to_string()))
     }
+}
 
+/// Function to download YouTube videos with yt-dlp
+fn download_youtube_video(url: &str, output_path: &str) -> Result<(), VideoConversionError> {
+    println!("Downloading video from YouTube...");
+
+    run_command(
+        Command::new("yt-dlp")
+            .arg("-f")
+            .arg("bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best") // Use MP4 format for compatibility
+            .arg("-o")
+            .arg(output_path)
+            .arg(url)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit()),
+    )?;
+
+    println!("Video downloaded successfully: {}", output_path);
     Ok(())
 }
 
-fn convert_to_mp3(input_path: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Function to convert MP4 to a QuickTime-compatible format
+fn convert_to_quicktime_compatible_mp4(input_path: &str, output_path: &str) -> Result<(), VideoConversionError> {
+    println!("Re-encoding video to QuickTime-compatible MP4...");
+
+    run_command(
+        Command::new("ffmpeg")
+            .arg("-i")
+            .arg(input_path)
+            .arg("-c:v")
+            .arg("libx264") // H.264 codec for video
+            .arg("-c:a")
+            .arg("aac")     // AAC codec for audio
+            .arg("-movflags")
+            .arg("+faststart") // For streaming compatibility
+            .arg(output_path)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit()),
+    )?;
+
+    println!("Re-encoding successful: {}", output_path);
+    Ok(())
+}
+
+/// Function to convert MP4 to MP3 audio-only
+fn convert_to_mp3(input_path: &str, output_path: &str) -> Result<(), VideoConversionError> {
     println!("Converting video to MP3...");
 
-    let status = Command::new("ffmpeg")
-        .arg("-i")
-        .arg(input_path)
-        .arg(output_path)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+    run_command(
+        Command::new("ffmpeg")
+            .arg("-i")
+            .arg(input_path)
+            .arg("-vn")   // Exclude video
+            .arg("-q:a")
+            .arg("2")     // Set audio quality
+            .arg(output_path)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit()),
+    )?;
 
-    if status.success() {
-        println!("Conversion successful: {}", output_path);
-    } else {
-        eprintln!("Error during conversion.");
-    }
-
+    println!("Conversion to MP3 successful: {}", output_path);
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Parse command line arguments
+fn main() -> Result<(), VideoConversionError> {
     let args = Args::parse();
 
     // Define paths
     let processed_dir = &args.output_dir;
-    let video_path = format!("{}/{}.{}", processed_dir, args.name, args.format);
+    let video_path = format!("{}/{}.mp4", processed_dir, args.name);
+    let compatible_mp4_path = format!("{}/{}_complete.mp4", processed_dir, args.name);
     let mp3_path = format!("{}/{}.mp3", processed_dir, args.name);
 
-    // Create the output directory if it doesn't exist
-    create_dir_all(processed_dir)?;
+    // Ensure the output directory exists
+    create_dir_all(processed_dir).map_err(|e| VideoConversionError::CommandError(e.to_string()))?;
 
-    // Step 1: Download the video from YouTube using yt-dlp
-    if let Err(e) = download_youtube_video(&args.url, &video_path, &args.format) {
-        eprintln!("Failed to download video: {}", e);
-        return Err(e); // Exit if download fails
+    // Step 1: Download video
+    download_youtube_video(&args.url, &video_path)?;
+
+    // Step 2: Convert to QuickTime-compatible MP4 if necessary
+    if Path::new(&video_path).exists() {
+        convert_to_quicktime_compatible_mp4(&video_path, &compatible_mp4_path)?;
+
+        // Cleanup: Delete original video file after successful re-encoding
+        remove_file(&video_path).map_err(|e| VideoConversionError::CommandError(format!("Failed to delete file: {}", e)))?;
+        println!("Original file {} deleted after re-encoding.", video_path);
+    } else {
+        return Err(VideoConversionError::FileNotFound(video_path));
     }
 
-    // Step 2: Convert to MP3 using FFmpeg
-    if std::path::Path::new(&video_path).exists() {
-        convert_to_mp3(&video_path, &mp3_path)?;
+    // Step 3: Convert compatible MP4 to MP3
+    if Path::new(&compatible_mp4_path).exists() {
+        convert_to_mp3(&compatible_mp4_path, &mp3_path)?;
     } else {
-        eprintln!("Error: Video file not found, cannot convert.");
+        return Err(VideoConversionError::FileNotFound(compatible_mp4_path));
     }
 
     Ok(())

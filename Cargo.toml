@@ -1,9 +1,10 @@
 [package]
 name = "videelow"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.11", features = ["blocking", "json"] }
+thiserror = "1.0"
